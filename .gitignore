@@ -1,0 +1,15 @@
+# Ignore uploaded test images, but keep folders and default_avatar.png
+avatars/*
+!avatars/default_avatar.png
+
+court_images/*
+!court_images/.gitkeep
+
+venue_images/*
+!venue_images/.gitkeep
+
+# OS & Editor temporary files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
