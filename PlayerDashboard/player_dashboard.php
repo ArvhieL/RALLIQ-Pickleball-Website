@@ -1,48 +1,45 @@
 <?php
 session_start();
 
-// Enforce Role-Based Access Control (RBAC)
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] !== 'Player') {
     header("Location: ../login.php");
     exit();
 }
 
-date_default_timezone_set('Asia/Manila');
-$today = date("Y-m-d");
-$now_time = date("H:i:s");
+require_once '../includes/db.php';
 
-$user_id = (int)$_SESSION['user_id'];
-$first_name = $_SESSION['first_name'];
+$user_id         = (int)$_SESSION['user_id'];
+$first_name      = $_SESSION['first_name'];
+$today           = date("Y-m-d");
+$now_time        = date("H:i:s");
+$formatted_today = date("l, F j, Y");
+$active_page     = 'dashboard';
 
-// Database Connection
-$serverName = "LAPTOP-QIJJ9RAT\SQLEXPRESS";
-$connectionOptions = [
-    "Database" => "FinalProject",
-    "Uid" => "",
-    "PWD" => ""
-];
-$conn = sqlsrv_connect($serverName, $connectionOptions);
-if ($conn === false) {
-    die(print_r(sqlsrv_errors(), true));
-}
+// Fetch player profile info for the header and navbar
+$sql_profile = "SELECT avatar_url, skill_level, city FROM users WHERE user_id = ?";
+$stmt_profile = sqlsrv_query($conn, $sql_profile, [$user_id]);
 
-// 1. Fetch Player Avatar & Profile Info (Parameterized)
-$avatar_filename = "default_avatar.png";
-$skill_level = "";
-$sql_user = "SELECT avatar_url, last_name, skill_level FROM users WHERE user_id = ?";
-$stmt_user = sqlsrv_query($conn, $sql_user, [$user_id]);
-if ($stmt_user && sqlsrv_has_rows($stmt_user)) {
-    $row = sqlsrv_fetch_array($stmt_user, SQLSRV_FETCH_ASSOC);
-    if (!empty($row['avatar_url'])) {
-        $avatar_filename = $row['avatar_url'];
+$display_avatar = "default_avatar.png";
+$skill_level    = "Unrated";
+$player_city    = "";
+
+if ($stmt_profile && sqlsrv_has_rows($stmt_profile)) {
+    $profile = sqlsrv_fetch_array($stmt_profile, SQLSRV_FETCH_ASSOC);
+    if (!empty($profile['avatar_url'])) {
+        $display_avatar = $profile['avatar_url'];
     }
-    $skill_level = $row['skill_level'];
+    if (!empty($profile['skill_level'])) {
+        $skill_level = $profile['skill_level'];
+    }
+    if (!empty($profile['city'])) {
+        $player_city = $profile['city'];
+    }
 }
 
-// 2. Fetch Upcoming Confirmed Private Rentals (Excludes Cancelled / Past End Times)
+// Fetch confirmed upcoming private court rentals
 $sql_rentals = "
-    SELECT b.booking_id, b.booking_date, b.start_time, b.end_time, c.court_name, v.venue_name,
-           (SELECT TOP(1) cp.picture_url FROM court_pictures AS cp WHERE cp.court_id = c.court_id ORDER BY cp.picture_id ASC) AS court_photo
+    SELECT b.booking_id, b.booking_date, b.start_time, b.end_time, b.total_amount,
+           c.court_name, c.court_type, v.venue_name, v.address
     FROM bookings AS b
     INNER JOIN courts AS c ON b.court_id = c.court_id
     INNER JOIN venues AS v ON c.venue_id = v.venue_id
@@ -54,22 +51,36 @@ $sql_rentals = "
 ";
 $stmt_rentals = sqlsrv_query($conn, $sql_rentals, [$user_id, $today, $today, $now_time]);
 
-// 3. Fetch Upcoming Enrolled Open Plays (Active & Future End Times Only)
+$upcoming_rentals = [];
+if ($stmt_rentals && sqlsrv_has_rows($stmt_rentals)) {
+    while ($row = sqlsrv_fetch_array($stmt_rentals, SQLSRV_FETCH_ASSOC)) {
+        $upcoming_rentals[] = $row;
+    }
+}
+
+// Fetch upcoming Open Play sessions joined by the player (grouped per session so guest slots don't duplicate cards)
 $sql_open_plays = "
-    SELECT op.play_id, op.title, op.play_date, op.start_time, op.end_time, c.court_name, v.venue_name,
-           COUNT(opr.roster_id) AS reserved_spots
-    FROM open_play_roster AS opr
-    INNER JOIN open_plays AS op ON opr.play_id = op.play_id
-    INNER JOIN courts AS c ON op.court_id = c.court_id
+    SELECT o.play_id, o.title, o.play_date, o.start_time, o.end_time, o.skill_level_req,
+           c.court_name, v.venue_name, COUNT(r.roster_id) AS reserved_spots
+    FROM open_play_roster AS r
+    INNER JOIN bookings AS rb ON r.booking_id = rb.booking_id
+    INNER JOIN open_plays AS o ON r.play_id = o.play_id
+    INNER JOIN courts AS c ON o.court_id = c.court_id
     INNER JOIN venues AS v ON c.venue_id = v.venue_id
-    INNER JOIN bookings AS b ON opr.booking_id = b.booking_id
-    WHERE opr.user_id = ?
-      AND b.status = 'Confirmed'
-      AND (op.play_date > ? OR (op.play_date = ? AND op.end_time > ?))
-    GROUP BY op.play_id, op.title, op.play_date, op.start_time, op.end_time, c.court_name, v.venue_name
-    ORDER BY op.play_date ASC, op.start_time ASC
+    WHERE r.user_id = ?
+      AND rb.status = 'Confirmed'
+      AND (o.play_date > ? OR (o.play_date = ? AND o.end_time > ?))
+    GROUP BY o.play_id, o.title, o.play_date, o.start_time, o.end_time, o.skill_requirement, c.court_name, v.venue_name
+    ORDER BY o.play_date ASC, o.start_time ASC
 ";
-$stmt_open_plays = sqlsrv_query($conn, $sql_open_plays, [$user_id, $today, $today, $now_time]);
+$stmt_plays = sqlsrv_query($conn, $sql_open_plays, [$user_id, $today, $today, $now_time]);
+
+$upcoming_plays = [];
+if ($stmt_plays && sqlsrv_has_rows($stmt_plays)) {
+    while ($row = sqlsrv_fetch_array($stmt_plays, SQLSRV_FETCH_ASSOC)) {
+        $upcoming_plays[] = $row;
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -78,179 +89,229 @@ $stmt_open_plays = sqlsrv_query($conn, $sql_open_plays, [$user_id, $today, $toda
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Player Dashboard - RALLIQ</title>
 
-    <!-- Bootstrap 5.2.3 CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-rbsA2VBKQhggwzxH7pPCaAqO46MgnOM80zW1RWuH61DGLwZJEdK2Kadq2F9CUG65" crossorigin="anonymous">
-
-    <!-- RALLIQ Organic Sport Theme -->
-    <link rel="stylesheet" href="../ralliq-theme.css?v=3">
+    <link rel="stylesheet" href="../ralliq-theme.css?v=4">
 </head>
 <body>
 
-    <!-- Top Navigation Bar -->
-    <nav class="navbar navbar-expand-lg bg-white sticky-top shadow-sm py-3">
+    <?php require_once '../includes/player_nav.php'; ?>
+
+    <!-- Player Welcome Header -->
+    <header class="page-header-strip">
         <div class="container">
-            <a class="navbar-brand" href="player_dashboard.php">
-                <img src="../assets/RalliQ Main Logo.png" alt="RALLIQ" height="30">
-            </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#playerNav" aria-controls="playerNav" aria-expanded="false" aria-label="Toggle navigation">
-                <span class="navbar-toggler-icon"></span>
-            </button>
+            <div class="row align-items-center gy-3">
+                <div class="col-12 col-lg-7 d-flex align-items-center gap-3">
+                    <img src="../avatars/<?php echo htmlspecialchars($display_avatar); ?>"
+                         onerror="this.src='../avatars/default_avatar.png';"
+                         alt="Profile Avatar"
+                         class="avatar-circle flex-shrink-0">
+                    <div>
+                        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+                            <span class="badge rounded-pill badge-slate px-3 py-1">Skill: <?php echo htmlspecialchars($skill_level); ?></span>
+                            <?php if ($player_city !== ''): ?>
+                                <span class="small text-stone">&bull; <?php echo htmlspecialchars($player_city); ?></span>
+                            <?php endif; ?>
+                        </div>
+                        <h1 class="h3 fw-bold mb-1">Welcome back, <?php echo htmlspecialchars($first_name); ?>!</h1>
+                        <p class="small text-stone mb-0"><?php echo htmlspecialchars($formatted_today); ?></p>
+                    </div>
+                </div>
 
-            <div class="collapse navbar-collapse" id="playerNav">
-                <ul class="navbar-nav me-auto mb-2 mb-lg-0 ms-lg-4 gap-lg-2 fw-semibold">
-                    <li class="nav-item"><a class="nav-link active" style="color: var(--color-forest);" aria-current="page" href="player_dashboard.php">Dashboard</a></li>
-                    <li class="nav-item"><a class="nav-link text-stone" href="discover.php">Discover Courts</a></li>
-                    <li class="nav-item"><a class="nav-link text-stone" href="open_plays.php">Open Play</a></li>
-                    <li class="nav-item"><a class="nav-link text-stone" href="play_history.php">Play History</a></li>
-                </ul>
-
-                <div class="d-flex align-items-center gap-3">
-                    <a href="edit_profile.php" class="text-decoration-none text-stone fw-semibold d-flex align-items-center">
-                        <img src="../avatars/<?php echo htmlspecialchars($avatar_filename); ?>" onerror="this.src='../avatars/default_avatar.png';" alt="Profile" class="nav-avatar me-2">
-                        My Profile
-                    </a>
-                    <a href="../logout.php" class="btn btn-sm btn-outline-danger rounded-pill px-3 fw-semibold">Logout</a>
+                <div class="col-12 col-lg-5 d-flex flex-wrap gap-2 justify-content-lg-end">
+                    <a href="discover.php" class="btn btn-primary px-4">+ Book a Court</a>
+                    <a href="open_plays.php" class="btn btn-outline-primary px-4">Join Open Play</a>
                 </div>
             </div>
         </div>
-    </nav>
+    </header>
 
-    <!-- Main Content -->
-    <div class="container py-5">
+    <main class="container pb-5">
 
-        <!-- Welcome Banner -->
-        <div class="dashboard-banner d-flex flex-column flex-sm-row align-items-start align-items-sm-center gap-4" style="background-image: url('../assets/Player Welcome Banner.png');">
-            <img src="../avatars/<?php echo htmlspecialchars($avatar_filename); ?>" onerror="this.src='../avatars/default_avatar.png';" alt="Profile Avatar" class="avatar-circle shadow-sm">
-            <div>
-                <h1 class="h2 fw-bold mb-1">Welcome back, <?php echo htmlspecialchars($first_name); ?>!</h1>
-                <p class="mb-0 fw-semibold text-stone">
-                    Skill Level: <span style="color: var(--color-forest);"><?php echo htmlspecialchars(!empty($skill_level) ? $skill_level : 'Not Specified'); ?></span>
-                </p>
-            </div>
-        </div>
-
-        <div class="row g-5">
-
-            <!-- Left Column: Upcoming Private Rentals -->
-            <div class="col-12 col-lg-6">
-                <div class="d-flex justify-content-between align-items-center mb-4">
-                    <h2 class="h4 fw-bold mb-0">Upcoming Court Rentals</h2>
-                    <a href="discover.php" class="btn btn-sm btn-primary-custom">Book a Court</a>
+        <!-- Quick Summary Row -->
+        <section class="row g-4 mb-5">
+            <div class="col-12 col-md-4">
+                <div class="card card-custom h-100 p-4">
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <div class="icon-badge-soft">
+                            <img src="../assets/Rental Calendar Icon.png" alt="Private Rentals" width="30" height="30" style="object-fit: contain;">
+                        </div>
+                        <div>
+                            <p class="small text-stone text-uppercase fw-semibold mb-0">Upcoming Rentals</p>
+                            <h2 class="h3 fw-bold mb-0"><?php echo count($upcoming_rentals); ?></h2>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-top d-flex justify-content-between align-items-center">
+                        <span class="small text-stone">Confirmed court slots</span>
+                        <a href="discover.php" class="small fw-semibold text-orange text-decoration-none">Reserve &rarr;</a>
+                    </div>
                 </div>
+            </div>
 
+            <div class="col-12 col-md-4">
+                <div class="card card-custom h-100 p-4">
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <div class="icon-badge-soft">
+                            <img src="../assets/Open Play Session Icon.png" alt="Open Plays" width="30" height="30" style="object-fit: contain;">
+                        </div>
+                        <div>
+                            <p class="small text-stone text-uppercase fw-semibold mb-0">Joined Open Plays</p>
+                            <h2 class="h3 fw-bold mb-0"><?php echo count($upcoming_plays); ?></h2>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-top d-flex justify-content-between align-items-center">
+                        <span class="small text-stone">Active drop-in games</span>
+                        <a href="open_plays.php" class="small fw-semibold text-orange text-decoration-none">Browse &rarr;</a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-12 col-md-4">
+                <div class="card card-custom h-100 p-4">
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <div class="icon-badge-soft">
+                            <img src="../assets/Court Icon.png" alt="Match History" width="30" height="30" style="object-fit: contain;">
+                        </div>
+                        <div>
+                            <p class="small text-stone text-uppercase fw-semibold mb-0">Activity &amp; Receipts</p>
+                            <h2 class="h5 fw-bold mb-0">Booking Ledger</h2>
+                        </div>
+                    </div>
+                    <div class="pt-2 border-top d-flex justify-content-between align-items-center">
+                        <span class="small text-stone">Past &amp; cancelled games</span>
+                        <a href="play_history.php" class="small fw-semibold text-orange text-decoration-none">View History &rarr;</a>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- View 1: Upcoming Private Court Rentals -->
+        <section class="mb-5">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <h2 class="h4 fw-bold mb-0">My Upcoming Private Rentals</h2>
+                    <p class="small text-stone mb-0">Confirmed private court reservations</p>
+                </div>
+                <a href="discover.php" class="btn btn-sm btn-soft-orange px-3">Find Courts</a>
+            </div>
+
+            <?php if (count($upcoming_rentals) > 0): ?>
                 <div class="row g-4">
-                    <?php if ($stmt_rentals && sqlsrv_has_rows($stmt_rentals)): ?>
-                        <?php while ($rental = sqlsrv_fetch_array($stmt_rentals, SQLSRV_FETCH_ASSOC)): ?>
-                            <?php
-                                $dateObj = $rental['booking_date'];
-                                $displayDate = ($dateObj instanceof DateTime) ? $dateObj->format('D, M j, Y') : $dateObj;
-                                $displayStart = ($rental['start_time'] instanceof DateTime) ? $rental['start_time']->format('g:i A') : $rental['start_time'];
-                                $displayEnd = ($rental['end_time'] instanceof DateTime) ? $rental['end_time']->format('g:i A') : $rental['end_time'];
-                                $courtPhoto = $rental['court_photo'];
-                            ?>
-                            <div class="col-12">
-                                <div class="card booking-card">
-                                    <?php if (!empty($courtPhoto)): ?>
-                                        <img src="../court_images/<?php echo htmlspecialchars($courtPhoto); ?>" alt="<?php echo htmlspecialchars($rental['court_name']); ?>" class="court-thumbnail w-100">
-                                    <?php else: ?>
-                                        <div class="court-thumbnail w-100 d-flex align-items-center justify-content-center">
-                                            <span class="text-white opacity-75 fw-semibold">Court Image Available Soon</span>
-                                        </div>
-                                    <?php endif; ?>
-
-                                    <div class="card-body p-4">
-                                        <div class="d-flex justify-content-between align-items-start mb-2">
-                                            <h5 class="fw-bold mb-0"><?php echo htmlspecialchars($rental['court_name']); ?></h5>
-                                            <span class="badge rounded-pill px-3 py-2 fw-semibold" style="background-color: rgba(214, 255, 79, 0.35); color: var(--color-forest);">Confirmed</span>
-                                        </div>
-                                        <p class="text-stone mb-3"><small><?php echo htmlspecialchars($rental['venue_name']); ?></small></p>
-
-                                        <div class="p-3 bg-light rounded-3">
-                                            <div class="d-flex align-items-center mb-2">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="var(--color-forest)" class="bi bi-calendar-event me-2" viewBox="0 0 16 16"><path d="M11 6.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1z"/><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5zM1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4H1z"/></svg>
-                                                <span class="fw-semibold text-dark"><?php echo htmlspecialchars($displayDate); ?></span>
-                                            </div>
-                                            <div class="d-flex align-items-center">
-                                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="var(--color-forest)" class="bi bi-clock me-2" viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
-                                                <span class="text-dark"><?php echo htmlspecialchars($displayStart . " - " . $displayEnd); ?></span>
-                                            </div>
-                                        </div>
-                                    </div>
+                    <?php foreach ($upcoming_rentals as $rental): ?>
+                        <?php
+                            $r_date  = $rental['booking_date']->format('M j, Y (D)');
+                            $r_start = $rental['start_time']->format('g:i A');
+                            $r_end   = $rental['end_time']->format('g:i A');
+                        ?>
+                        <div class="col-12 col-md-6 col-lg-4">
+                            <div class="card booking-card p-4">
+                                <div class="d-flex justify-content-between align-items-start mb-3">
+                                    <span class="badge rounded-pill badge-soft-orange px-3 py-1"><?php echo htmlspecialchars($r_date); ?></span>
+                                    <span class="fw-bold small text-orange">&#8369;<?php echo number_format((float)$rental['total_amount'], 2); ?></span>
+                                </div>
+                                <h3 class="h5 fw-bold mb-1"><?php echo htmlspecialchars($rental['court_name']); ?></h3>
+                                <p class="small fw-medium mb-2"><?php echo htmlspecialchars($rental['venue_name']); ?></p>
+                                <p class="small text-stone mb-3">
+                                    <?php echo htmlspecialchars($r_start . ' - ' . $r_end); ?> &bull; <?php echo htmlspecialchars($rental['court_type']); ?>
+                                </p>
+                                <div class="mt-auto pt-3 border-top d-flex justify-content-between align-items-center">
+                                    <span class="small text-stone text-truncate me-2"><?php echo htmlspecialchars($rental['venue_address']); ?></span>
+                                    <span class="badge bg-success bg-opacity-10 text-success rounded-pill">Confirmed</span>
                                 </div>
                             </div>
-                        <?php endwhile; ?>
-                    <?php else: ?>
-                        <div class="col-12">
-                            <div class="p-5 text-center bg-white rounded-4 shadow-sm">
-                                <p class="text-stone mb-3">You have no upcoming private rentals.</p>
-                                <a href="discover.php" class="btn btn-sm btn-primary-custom">Browse Available Courts</a>
-                            </div>
                         </div>
-                    <?php endif; ?>
+                    <?php endforeach; ?>
                 </div>
+            <?php else: ?>
+                <div class="card card-custom p-5 text-center">
+                    <img src="../assets/Rental Calendar Icon.png" alt="No Rentals" width="52" height="52" class="mx-auto mb-3" style="object-fit: contain;">
+                    <h3 class="h5 fw-bold mb-1">No Upcoming Private Rentals</h3>
+                    <p class="small text-stone mb-3">Reserve a court for solo practice or a private match with friends.</p>
+                    <div>
+                        <a href="discover.php" class="btn btn-primary btn-sm px-4">Discover Courts</a>
+                    </div>
+                </div>
+            <?php endif; ?>
+        </section>
+
+        <!-- View 2: Upcoming Joined Open Plays -->
+        <section>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <div>
+                    <h2 class="h4 fw-bold mb-0">My Upcoming Open Plays</h2>
+                    <p class="small text-stone mb-0">Drop-in sessions you are registered to play</p>
+                </div>
+                <a href="open_plays.php" class="btn btn-sm btn-soft-orange px-3">Browse Sessions</a>
             </div>
 
-            <!-- Right Column: Enrolled Open Plays -->
-            <div class="col-12 col-lg-6">
-                <div class="d-flex justify-content-between align-items-center mb-4">
-                    <h2 class="h4 fw-bold mb-0">Enrolled Open Plays</h2>
-                    <a href="open_plays.php" class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-semibold" style="color: var(--color-forest); border-color: var(--color-forest);">Find Games</a>
-                </div>
-
-                <div class="row g-4">
-                    <?php if ($stmt_open_plays && sqlsrv_has_rows($stmt_open_plays)): ?>
-                        <?php while ($play = sqlsrv_fetch_array($stmt_open_plays, SQLSRV_FETCH_ASSOC)): ?>
-                            <?php
-                                $dateObj = $play['play_date'];
-                                $displayDate = ($dateObj instanceof DateTime) ? $dateObj->format('D, M j, Y') : $dateObj;
-                                $displayStart = ($play['start_time'] instanceof DateTime) ? $play['start_time']->format('g:i A') : $play['start_time'];
-                                $displayEnd = ($play['end_time'] instanceof DateTime) ? $play['end_time']->format('g:i A') : $play['end_time'];
-                                $spots = (int)$play['reserved_spots'];
-                            ?>
-                            <div class="col-12">
-                                <div class="card booking-card bg-white p-4">
-                                    <div class="d-flex gap-4 align-items-center">
-                                        <div class="flex-shrink-0 text-center">
-                                            <img src="../assets/Open Play Session Icon.png" alt="Open Play" class="open-play-icon mb-2">
-                                            <span class="d-block badge rounded-pill" style="background-color: var(--color-lime); color: var(--color-forest);">
-                                                <?php echo $spots . ($spots === 1 ? " Spot" : " Spots"); ?>
+            <?php if (count($upcoming_plays) > 0): ?>
+                <div class="card card-custom overflow-hidden">
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle table-ralliq mb-0">
+                            <thead>
+                                <tr>
+                                    <th>Session</th>
+                                    <th>Venue &amp; Court</th>
+                                    <th>Date &amp; Time</th>
+                                    <th>Skill Tier</th>
+                                    <th>Spots</th>
+                                    <th class="text-end">Action</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($upcoming_plays as $play): ?>
+                                    <?php
+                                        $p_date  = $play['play_date']->format('M j, Y');
+                                        $p_time  = $play['start_time']->format('g:i A') . ' - ' . $play['end_time']->format('g:i A');
+                                        $spots   = (int)$play['reserved_spots'];
+                                    ?>
+                                    <tr>
+                                        <td>
+                                            <div class="d-flex align-items-center gap-3">
+                                                <img src="../assets/Open Play Session Icon.png" alt="Open Play" width="38" height="38" style="object-fit: contain;">
+                                                <span class="fw-bold"><?php echo htmlspecialchars($play['title']); ?></span>
+                                            </div>
+                                        </td>
+                                        <td>
+                                            <div class="fw-medium"><?php echo htmlspecialchars($play['venue_name']); ?></div>
+                                            <div class="small text-stone"><?php echo htmlspecialchars($play['court_name']); ?></div>
+                                        </td>
+                                        <td>
+                                            <div class="fw-medium"><?php echo htmlspecialchars($p_date); ?></div>
+                                            <div class="small text-stone"><?php echo htmlspecialchars($p_time); ?></div>
+                                        </td>
+                                        <td>
+                                            <span class="badge rounded-pill badge-slate px-3 py-1"><?php echo htmlspecialchars($play['skill_requirement']); ?></span>
+                                        </td>
+                                        <td>
+                                            <span class="badge rounded-pill badge-soft-orange px-3 py-1">
+                                                <?php echo $spots . ($spots === 1 ? ' Player' : ' Players'); ?>
                                             </span>
-                                        </div>
-
-                                        <div class="flex-grow-1">
-                                            <h5 class="fw-bold mb-1"><?php echo htmlspecialchars($play['title']); ?></h5>
-                                            <p class="text-stone mb-2 small"><?php echo htmlspecialchars($play['venue_name'] . " - " . $play['court_name']); ?></p>
-
-                                            <div class="d-flex flex-wrap gap-3">
-                                                <div class="d-flex align-items-center">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-calendar-event text-secondary me-1" viewBox="0 0 16 16"><path d="M11 6.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5v-1z"/><path d="M3.5 0a.5.5 0 0 1 .5.5V1h8V.5a.5.5 0 0 1 1 0V1h1a2 2 0 0 1 2 2v11a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V3a2 2 0 0 1 2-2h1V.5a.5.5 0 0 1 .5-.5zM1 4v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4H1z"/></svg>
-                                                    <span class="small fw-semibold"><?php echo htmlspecialchars($displayDate); ?></span>
-                                                </div>
-                                                <div class="d-flex align-items-center">
-                                                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" class="bi bi-clock text-secondary me-1" viewBox="0 0 16 16"><path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/><path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/></svg>
-                                                    <span class="small"><?php echo htmlspecialchars($displayStart . " - " . $displayEnd); ?></span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        <?php endwhile; ?>
-                    <?php else: ?>
-                        <div class="col-12">
-                            <div class="p-5 text-center bg-white rounded-4 shadow-sm">
-                                <p class="text-stone mb-3">You haven't joined any upcoming Open Play sessions.</p>
-                                <a href="open_plays.php" class="btn btn-sm btn-outline-secondary rounded-pill px-3 fw-semibold" style="color: var(--color-forest); border-color: var(--color-forest);">Explore Open Plays</a>
-                            </div>
-                        </div>
-                    <?php endif; ?>
+                                        </td>
+                                        <td class="text-end">
+                                            <a href="open_play_details.php?play_id=<?php echo (int)$play['play_id']; ?>" class="btn btn-sm btn-outline-primary px-3">
+                                                View Roster
+                                            </a>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
-            </div>
+            <?php else: ?>
+                <div class="card card-custom p-5 text-center">
+                    <img src="../assets/Open Play Session Icon.png" alt="No Open Plays" width="52" height="52" class="mx-auto mb-3" style="object-fit: contain;">
+                    <h3 class="h5 fw-bold mb-1">No Joined Open Play Sessions</h3>
+                    <p class="small text-stone mb-3">Join a scheduled Open Play session to match up with local players.</p>
+                    <div>
+                        <a href="open_plays.php" class="btn btn-primary btn-sm px-4">Find Open Plays</a>
+                    </div>
+                </div>
+            <?php endif; ?>
+        </section>
 
-        </div>
-    </div>
+    </main>
 
-    <!-- Bootstrap 5.2.3 JS Bundle -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.2.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-kenU1KFdBIe4zVF0s0G1M5b4hcpxyD9F7jL+jjXkk+Q2h455rYXK/7HAuoJl+0I4" crossorigin="anonymous"></script>
 </body>
 </html>
